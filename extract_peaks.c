@@ -36,7 +36,7 @@ typedef struct region_str {
     LIST_HEAD(struct region_str);
 
     int npixels;
-    int npixels_significant;
+    int npixels_bg;
 
     int is_edge;
     int is_noise;
@@ -51,7 +51,7 @@ typedef struct region_str {
     struct list_head pixels;
 } region_str;
 
-region_str *extract_region(image_str *image, image_str *smooth, image_str *mask, int x0, int y0)
+region_str *extract_region(image_str *image, image_str *smooth, image_str *mask, int x0, int y0, double threshold)
 {
     region_str *region = (region_str *)calloc(1, sizeof(region_str));
     int stack_length = 100;
@@ -63,14 +63,15 @@ region_str *extract_region(image_str *image, image_str *smooth, image_str *mask,
 
     double bg_sum = 0;
     double bg_sum2 = 0;
-    int bg_N = 0;
 
     pixel_str *pixel = NULL;
+
+    /* dprintf("\n%d %d - %g\n", x0, y0, threshold); */
 
     init_list(region->pixels);
 
     region->npixels = 0;
-    region->npixels_significant = 0;
+    region->npixels_bg = 0;
 
     region->is_edge = FALSE;
     region->is_noise = FALSE;
@@ -119,7 +120,8 @@ region_str *extract_region(image_str *image, image_str *smooth, image_str *mask,
             int y1 = y + dy5[i];
 
             if(IS_PIXEL_VALID(smooth, x1, y1) && !PIXEL(mask, x1, y1)){
-                if(PIXEL_DOUBLE(smooth, x1, y1) <= value0 + 1e-10){
+                if((PIXEL_DOUBLE(smooth, x1, y1) <= value0 + 1e-10) ||
+                   (threshold > 0 && PIXEL_DOUBLE(smooth, x1, y1) >= threshold + 1e-10)){
                     if(stack_pos == stack_length){
                         stack_length *= 2;
                         stack_x = realloc(stack_x, sizeof(int)*stack_length);
@@ -162,7 +164,7 @@ region_str *extract_region(image_str *image, image_str *smooth, image_str *mask,
                 pixel->is_edge = TRUE;
                 bg_sum += pixel->flux;
                 bg_sum2 += pixel->flux*pixel->flux;
-                bg_N ++;
+                region->npixels_bg ++;
 
                 break;
             }
@@ -171,8 +173,8 @@ region_str *extract_region(image_str *image, image_str *smooth, image_str *mask,
 
     region->mean_flux /= region->npixels;
 
-    region->bg_mean = bg_sum/bg_N;
-    region->bg_sigma = sqrt((bg_sum2 - bg_sum*bg_sum/bg_N)/(bg_N - 1));
+    region->bg_mean = bg_sum/region->npixels_bg;
+    region->bg_sigma = sqrt((bg_sum2 - bg_sum*bg_sum/region->npixels_bg)/(region->npixels_bg - 1));
 
     foreach(pixel, region->pixels){
         PIXEL(mask, pixel->x, pixel->y) = FALSE;
@@ -181,7 +183,41 @@ region_str *extract_region(image_str *image, image_str *smooth, image_str *mask,
     free(stack_x);
     free(stack_y);
 
+    /* dprintf("%d pixels, %d bg, %g %g\n", region->npixels, region->npixels_bg, region->bg_mean, region->bg_sigma); */
+
+    if(!threshold && region->npixels_bg > 10){
+        threshold = region->bg_mean + 3.0*region->bg_sigma;
+
+        if(isfinite(threshold) && threshold > 0){
+            free_list(region->pixels);
+            free(region);
+
+            region = extract_region(image, smooth, mask, x0, y0, threshold);
+        }
+    }
+
     return region;
+}
+
+void mask_region(image_str *mask, region_str *region)
+{
+    pixel_str *pixel = NULL;
+
+    foreach(pixel, region->pixels)
+        if(!pixel->is_edge){
+            PIXEL(mask, pixel->x, pixel->y) = TRUE;
+        }
+}
+
+void dump_region(region_str *region, char *filename)
+{
+    FILE *file = fopen(filename, "w");
+    pixel_str *pixel = NULL;
+
+    foreach(pixel, region->pixels)
+        fprintf(file, "%d %d %g %g %d\n", pixel->x, pixel->y, pixel->flux, pixel->flux - region->bg_mean, pixel->is_edge);
+
+    fclose(file);
 }
 
 peak_str *peak_from_region(region_str *region)
@@ -273,6 +309,9 @@ void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
             double is_peak = TRUE;
             int d;
 
+            if(PIXEL(mask, x, y))
+                continue;
+
             for(d = 1; d < dN; d++)
                 if(x+dx[d] >= 0 && x+dx[d] < smooth->width &&
                    y+dy[d] >= 0 && y+dy[d] < smooth->height &&
@@ -282,14 +321,17 @@ void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
                 }
 
             if(is_peak){
-                region_str *region = extract_region(image, smooth, mask, x, y);
+                region_str *region = extract_region(image, smooth, mask, x, y, 0);
                 peak_str *peak = peak_from_region(region);
 
-                if(peak->excess > 5.0){
+                if(region->npixels_bg > 1 && peak->excess > 5.0){
                     add_to_list_end(*peaks, peak);
                     Ngood ++;
                 } else
                     free(peak);
+
+                if(isatty(fileno(stderr)))
+                    dprintf("\r  %d / %d\r", Ngood, Ntotal);
 
                 Ntotal ++;
 

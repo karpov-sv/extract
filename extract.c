@@ -409,8 +409,6 @@ int model_update_peaks(model_str *model, image_str *image)
 
             if(debug)
                 dprintf("%g %g - %g %g - %d\n\n", peak->x, peak->y, peak->chisq, fabs(peak->dflux/peak->flux), peak->state);
-
-
         }
     }
 
@@ -458,9 +456,8 @@ void subtract_peaks_from_image(image_str *image, psf_str *psf, struct list_head 
     }
 }
 
-void process_image_get_peaks(image_str *image, image_str *errors, psf_str *psf, double threshold, struct list_head *peaks)
+void psf_fit_peaks(image_str *image, image_str *smooth, image_str *errors, psf_str *psf, double threshold, struct list_head *peaks)
 {
-    image_str *smooth = image_smooth(image, 1);
     struct kdtree *kd = kd_create(2);
     peak_str *peak;
     int size = 2*floor(0.5*psf->width*psf->pix_step); /* It should be always even */
@@ -468,19 +465,9 @@ void process_image_get_peaks(image_str *image, image_str *errors, psf_str *psf, 
     int Npeaks = 0;
     int Nprocessed = 0;
 
-    find_peaks(image, smooth, peaks);
     Npeaks = list_length(peaks);
-    dprintf("%d initial peaks found\n", Npeaks);
 
     dprintf("Window size is %d x %d pixels\n", size, size);
-
-    if(debug){
-        image_dump_to_fits(image, "out.image.fits");
-        image_dump_to_fits(errors, "out.errors.fits");
-        image_dump_to_fits(smooth, "out.smooth.fits");
-
-        dump_peaks_to_file_full(peaks, "out.peaks.full.txt");
-    }
 
     /* Fill kd-tree with all peaks */
     foreach(peak, *peaks){
@@ -625,10 +612,15 @@ int main(int argc, char **argv)
         dprintf("PSF for %s created and stored to %s\n", filename, outname);
 
         psf_delete(psf);
-    } else if(is_simple){
+    } else {
         image_str *image = image_create_from_fits(filename);
         image_str *smooth = NULL;
+        image_str *errors = NULL;
         struct list_head peaks;
+
+        if(width > 0 && height > 0){
+            image = image_crop(image, x0, y0, x0 + width, y0 + height);
+        }
 
         if(image->type != IMAGE_DOUBLE){
             /* The code expects IMAGE_DOUBLE */
@@ -636,76 +628,71 @@ int main(int argc, char **argv)
 
             image_delete(image);
             image = new;
-        }
-
-        if(width > 0 && height > 0){
-            image = image_crop(image, x0, y0, x0 + width, y0 + height);
         }
 
         smooth = image_smooth(image, 1);
+        errors = image_errors(image, bias, gain, readnoise);
 
         find_peaks(image, smooth, &peaks);
 
-        dump_peaks_to_file_full(&peaks, outname);
+        dprintf("%d image peaks found\n", list_length(&peaks));
 
-        free_list(peaks);
-        image_delete(smooth);
-        image_delete(image);
-    } else {
-        image_str *image = image_create_from_fits(filename);
-        image_str *errors = NULL;
-        psf_str *psf = NULL;
-        struct list_head peaks;
+        if(debug){
+            image_dump_to_fits(image, "out.image.fits");
+            image_dump_to_fits(errors, "out.errors.fits");
+            image_dump_to_fits(smooth, "out.smooth.fits");
 
-        if(!psfname)
-            psfname = make_string("%s.psf", filename);
+            dump_peaks_to_file_full(&peaks, "out.peaks.full.txt");
+        }
 
-        if(file_exists_and_normal(psfname)) {
-            dprintf("Loading PSF from PSFEx file %s\n", psfname);
-            psf = psf_create(psfname);
+        if(is_simple){
+            dump_peaks_to_file_full(&peaks, outname);
+
+            if(debug)
+                dump_peaks_to_file_full(&peaks, "out.peaks.result.txt");
         } else {
-            if(psfname)
-                dprintf("Can't find file %s\n", psfname);
-            dprintf("Extracting PSF from FITS file %s\n", filename);
-            psf = psf_create_from_fits(filename);
+            psf_str *psf = NULL;
+
+            if(!psfname)
+                psfname = make_string("%s.psf", filename);
+
+            if(file_exists_and_normal(psfname)) {
+                dprintf("Loading PSF from PSFEx file %s\n", psfname);
+                psf = psf_create(psfname);
+            } else {
+                if(psfname)
+                    dprintf("Can't find file %s\n", psfname);
+                dprintf("Extracting PSF from FITS file %s\n", filename);
+                psf = psf_create_from_fits(filename);
+            }
+
+            dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
+            dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy);
+
+            dprintf("%s: %d x %d, min = %g, max = %g\n", filename, image->width, image->height,
+                    image_min_value(image), image_max_value(image));
+
+            if(max_fwhm > 0 && psf->fwhm > max_fwhm){
+                dprintf("PSF FWHM is too large!\n");
+                return EXIT_FAILURE;
+            }
+
+            if(width > 0 && height > 0){
+                psf->x0 -= x0;
+                psf->y0 -= y0;
+            }
+
+            psf_fit_peaks(image, smooth, errors, psf, threshold, &peaks);
+
+            dump_peaks_to_file(&peaks, outname);
+
+            psf_delete(psf);
         }
-
-        if(width > 0 && height > 0){
-            image = image_crop(image, x0, y0, x0 + width, y0 + height);
-
-            psf->x0 -= x0;
-            psf->y0 -= y0;
-        }
-
-        if(image->type != IMAGE_DOUBLE){
-            /* The code expects IMAGE_DOUBLE */
-            image_str *new = image_convert_to_double(image);
-
-            image_delete(image);
-            image = new;
-        }
-
-        dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
-        dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy);
-
-        dprintf("%s: %d x %d, min = %g, max = %g\n", filename, image->width, image->height,
-                image_min_value(image), image_max_value(image));
-
-        if(max_fwhm > 0 && psf->fwhm > max_fwhm){
-            dprintf("PSF FWHM is too large!\n");
-            return EXIT_FAILURE;
-        }
-
-        errors = image_errors(image, bias, gain, readnoise);
-
-        process_image_get_peaks(image, errors, psf, threshold, &peaks);
-
-        dump_peaks_to_file(&peaks, outname);
 
         free_list(peaks);
 
-        psf_delete(psf);
         image_delete(errors);
+        image_delete(smooth);
         image_delete(image);
     }
 
