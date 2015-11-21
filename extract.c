@@ -553,8 +553,6 @@ void psf_fit_peaks(image_str *image, image_str *smooth, image_str *errors, psf_s
     }
 
     kd_free(kd);
-
-    image_delete(smooth);
 }
 
 int main(int argc, char **argv)
