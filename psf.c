@@ -406,3 +406,75 @@ psf_str *psf_create_from_fits(char *filename)
 {
     return psf_create_from_fits_and_save(filename, NULL);
 }
+
+image_str *image_smooth_psf(image_str *image, psf_str *psf)
+{
+    image_str *res = image_create_double(image->width, image->height);
+    int x;
+    int y;
+    int step = 8;
+    int size = floor(0.5*psf->width*psf->pix_step);
+    double saturation = image_max_value(image);
+
+    for(y = 0; y < image->height; y += step){
+        /* if(isatty(fileno(stderr))) */
+        /*     dprintf("PSF smoothing: %d / %d\t\r", y, image->height); */
+
+        for(x = 0; x < image->width; x += step){
+            image_str *sampled = psf_sampled_image(psf, x+0.5*step, y+0.5*step);
+            image_str *kernel = psf_image(psf, sampled, 0, 0, 2*size+1);
+            int dx;
+            int dy;
+
+            for(dy = 0; dy < step; dy ++)
+                for(dx = 0; dx < step; dx ++){
+                    int x1 = 0;
+                    int y1 = 0;
+                    double value = 0;
+                    double kernel_sum = 0;
+
+                    for(x1 = MAX(0, x+dx-size); x1 < MIN(image->width, x+dx+size+1); x1++)
+                        for(y1 = MAX(0, y+dy-size); y1 < MIN(image->height, y+dy+size+1); y1++){
+                            double weight = PIXEL_DOUBLE(kernel, x1 - x-dx + size, y1 - y-dy + size);
+
+                            if(image->type == IMAGE_DOUBLE){
+                                if(PIXEL_DOUBLE(image, x1, y1) < saturation)
+                                    value += PIXEL_DOUBLE(image, x1, y1)*weight;
+                            } else {
+                                if(PIXEL(image, x1, y1) < saturation)
+                                    value += PIXEL(image, x1, y1)*weight;
+                            }
+
+                            kernel_sum += weight;
+                        }
+
+                    PIXEL_DOUBLE(res, x+dx, y+dy) = value/kernel_sum;
+                }
+
+            image_delete(kernel);
+            image_delete(sampled);
+        }
+    }
+
+    /* if(isatty(fileno(stderr))) */
+    /*     dprintf("\n"); */
+
+    image_copy_properties(image, res);
+
+    return res;
+}
+
+image_str *image_unsharp_psf(image_str *image, psf_str *psf)
+{
+    image_str *smooth = image_smooth_psf(image, psf);
+    int d;
+
+    if(image->type == IMAGE_DOUBLE)
+        for(d = 0; d < image->width*image->height; d++)
+            smooth->double_data[d] = image->double_data[d] - smooth->double_data[d];
+    else
+        for(d = 0; d < image->width*image->height; d++)
+            smooth->double_data[d] = image->data[d] - smooth->double_data[d];
+
+    return smooth;
+}

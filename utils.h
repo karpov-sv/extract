@@ -87,6 +87,7 @@ inline double sign(double );
 /* Rough estimation of the median */
 double get_median(double *, int );
 double get_median_mad(double *, int , double *);
+double get_quantile(double *, int , double );
 
 /* Mean and variance of the array */
 double get_mean(double *, int , double *);

@@ -469,6 +469,21 @@ image_str *image_smooth(image_str *image, double sigma)
     return res;
 }
 
+image_str *image_unsharp(image_str *image, double sigma)
+{
+    image_str *smooth = image_smooth(image, sigma);
+    int d;
+
+    if(image->type == IMAGE_DOUBLE)
+        for(d = 0; d < image->width*image->height; d++)
+            smooth->double_data[d] = image->double_data[d] - smooth->double_data[d];
+    else
+        for(d = 0; d < image->width*image->height; d++)
+            smooth->double_data[d] = image->data[d] - smooth->double_data[d];
+
+    return smooth;
+}
+
 image_str *image_errors(image_str *image, double bias, double gain, double readnoise)
 {
     image_str *errors = image_create_double(image->width, image->height);

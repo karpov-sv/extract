@@ -33,4 +33,7 @@ image_str *psf_image(psf_str *, image_str *, double , double , int );
 psf_str *psf_create_from_fits_and_save(char *, char *);
 psf_str *psf_create_from_fits(char *);
 
+image_str *image_smooth_psf(image_str *, psf_str *);
+image_str *image_unsharp_psf(image_str *, psf_str *);
+
 #endif /* PSF_H */

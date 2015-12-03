@@ -124,6 +124,7 @@ void image_clean_stripes(image_str *);
 
 /* Image smoothing - Gaussian */
 image_str *image_smooth(image_str *, double );
+image_str *image_unsharp(image_str *, double );
 
 /* Errors image from data image using bias, gain and readout noise */
 image_str *image_errors(image_str *, double , double , double );

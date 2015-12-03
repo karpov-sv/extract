@@ -456,7 +456,7 @@ void subtract_peaks_from_image(image_str *image, psf_str *psf, struct list_head 
     }
 }
 
-void psf_fit_peaks(image_str *image, image_str *smooth, image_str *errors, psf_str *psf, double threshold, struct list_head *peaks)
+void psf_fit_peaks(image_str *image, image_str *errors, psf_str *psf, double threshold, struct list_head *peaks)
 {
     struct kdtree *kd = kd_create(2);
     peak_str *peak;
@@ -567,6 +567,10 @@ int main(int argc, char **argv)
 
     int is_psfex = FALSE;
     int is_simple = FALSE;
+    int is_gauss = FALSE;
+    int is_keep_psf = FALSE;
+    int is_keep_simple = FALSE;
+    int is_unsharp = FALSE;
 
     double bias = 100.0;
     double gain = 0.6;
@@ -583,6 +587,10 @@ int main(int argc, char **argv)
                "psf=%s", &psfname,
                "-psfex", &is_psfex,
                "-simple", &is_simple,
+               "-gauss", &is_gauss,
+               "-keep_psf", &is_keep_psf,
+               "-keep_simple", &is_keep_simple,
+               "-unsharp", &is_unsharp,
                "-debug", &debug,
 
                "bias=%lf", &bias,
@@ -615,6 +623,29 @@ int main(int argc, char **argv)
         image_str *smooth = NULL;
         image_str *errors = NULL;
         struct list_head peaks;
+        psf_str *psf = NULL;
+
+        if(!psfname)
+            psfname = make_string("%s.psf", filename);
+
+        if(file_exists_and_normal(psfname)) {
+            dprintf("Loading PSF from PSFEx file %s\n", psfname);
+            psf = psf_create(psfname);
+        } else {
+            if(psfname)
+                dprintf("Can't find file %s\n", psfname);
+            dprintf("Extracting PSF from FITS file %s\n", filename);
+            psf = psf_create_from_fits(filename);
+
+            if(is_keep_psf){
+                psf = psf_create_from_fits_and_save(filename, psfname);
+                dprintf("PSF for %s created and stored to %s\n", filename, psfname);
+            } else
+                psf = psf_create_from_fits(filename);
+        }
+
+        dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
+        dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy);
 
         if(width > 0 && height > 0){
             image = image_crop(image, x0, y0, x0 + width, y0 + height);
@@ -628,8 +659,26 @@ int main(int argc, char **argv)
             image = new;
         }
 
-        smooth = image_smooth(image, 1);
+        if(is_gauss){
+            dprintf("Unsharping using Gaussian\n");
+            smooth = image_unsharp(image, 1);
+        } else {
+            dprintf("Unsharping using exact PSF\n");
+            smooth = image_unsharp_psf(image, psf);
+        }
+
+        if(is_unsharp){
+            if(!outname)
+                outname = make_string("%s.unsharp.fits", filename);
+
+            image_dump_to_fits(smooth, outname);
+            dprintf("Unsharped image written to %s\n", outname);
+            return EXIT_SUCCESS;
+        }
+
         errors = image_errors(image, bias, gain, readnoise);
+
+        dprintf("Extracting initial peaks\n");
 
         find_peaks(image, smooth, &peaks);
 
@@ -649,23 +698,15 @@ int main(int argc, char **argv)
             if(debug)
                 dump_peaks_to_file_full(&peaks, "out.peaks.result.txt");
         } else {
-            psf_str *psf = NULL;
+            if(is_keep_simple){
+                char *simplename = make_string("%s.simple", filename);
 
-            if(!psfname)
-                psfname = make_string("%s.psf", filename);
+                dump_peaks_to_file_full(&peaks, simplename);
 
-            if(file_exists_and_normal(psfname)) {
-                dprintf("Loading PSF from PSFEx file %s\n", psfname);
-                psf = psf_create(psfname);
-            } else {
-                if(psfname)
-                    dprintf("Can't find file %s\n", psfname);
-                dprintf("Extracting PSF from FITS file %s\n", filename);
-                psf = psf_create_from_fits(filename);
+                dprintf("Initial peaks stored to %s\n", simplename);
+
+                free(simplename);
             }
-
-            dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
-            dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy);
 
             dprintf("%s: %d x %d, min = %g, max = %g\n", filename, image->width, image->height,
                     image_min_value(image), image_max_value(image));
@@ -680,14 +721,14 @@ int main(int argc, char **argv)
                 psf->y0 -= y0;
             }
 
-            psf_fit_peaks(image, smooth, errors, psf, threshold, &peaks);
+            psf_fit_peaks(image, errors, psf, threshold, &peaks);
 
             dump_peaks_to_file(&peaks, outname);
-
-            psf_delete(psf);
         }
 
         free_list(peaks);
+
+        psf_delete(psf);
 
         image_delete(errors);
         image_delete(smooth);

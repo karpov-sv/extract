@@ -635,6 +635,29 @@ double get_median_mad(double *x, int N, double *mad_ptr)
     return value;
 }
 
+static int compare_double_fn(const void *v1, const void *v2)
+{
+    double res = *(double *)v1 - *(double *)v2;
+
+    return (res > 0 ? 1 : (res < 0 ? -1 : 0));
+}
+
+double get_quantile(double *x, int N, double p)
+{
+    double *arr = (double *)malloc(sizeof(double)*N);
+    double value = 0;
+
+    memcpy(arr, x, N*sizeof(double));
+
+    qsort(arr, N, sizeof(double), compare_double_fn);
+
+    value = arr[MAX(0, MIN(N - 1, (int)floor(p*N)))];
+
+    free(arr);
+
+    return value;
+}
+
 int copy_file(char *from_name, char *to_name)
 {
     char buf[BUFSIZ];
