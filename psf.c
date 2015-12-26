@@ -10,9 +10,16 @@
 
 #include "psf.h"
 
+int psf_var_degree = 4;
+int psf_vignet_size = 30;
+int psf_size = 40;
+double psf_gain = 0.0;
+double psf_satur_level = 50000.0;
+double psf_phot_aper = 5.0;
+
 psf_str *psf_create(char *filename)
 {
-    psf_str *psf = (psf_str *)malloc(sizeof(psf_str));
+    psf_str *psf = (psf_str *)calloc(1, sizeof(psf_str));
     fitsfile *fits = NULL;
     int status = 0;
     int tmp_i = 0;
@@ -25,18 +32,21 @@ psf_str *psf_create(char *filename)
     fits_open_file(&fits, filename, READONLY, &status);
     fits_movabs_hdu(fits, 2, &tmp_i, &status);
 
-    fits_read_key(fits, TDOUBLE, "POLZERO1", &psf->x0, NULL, &status);
-    fits_read_key(fits, TDOUBLE, "POLSCAL1", &psf->sx, NULL, &status);
-    fits_read_key(fits, TDOUBLE, "POLZERO2", &psf->y0, NULL, &status);
-    fits_read_key(fits, TDOUBLE, "POLSCAL2", &psf->sy, NULL, &status);
-
-    fits_read_key(fits, TINT, "POLDEG1", &psf->degree, NULL, &status);
     fits_read_key(fits, TDOUBLE, "PSF_SAMP", &psf->pix_step, NULL, &status);
     fits_read_key(fits, TDOUBLE, "PSF_FWHM", &psf->fwhm, NULL, &status);
 
     fits_read_key(fits, TINT, "PSFAXIS1", &psf->width, NULL, &status);
     fits_read_key(fits, TINT, "PSFAXIS2", &psf->height, NULL, &status);
     fits_read_key(fits, TINT, "PSFAXIS3", &psf->ncoeffs, NULL, &status);
+
+    if(psf->ncoeffs > 1){
+        fits_read_key(fits, TINT, "POLDEG1", &psf->degree, NULL, &status);
+
+        fits_read_key(fits, TDOUBLE, "POLZERO1", &psf->x0, NULL, &status);
+        fits_read_key(fits, TDOUBLE, "POLSCAL1", &psf->sx, NULL, &status);
+        fits_read_key(fits, TDOUBLE, "POLZERO2", &psf->y0, NULL, &status);
+        fits_read_key(fits, TDOUBLE, "POLSCAL2", &psf->sy, NULL, &status);
+    }
 
     psf->C = malloc(sizeof(double)*psf->ncoeffs*psf->width*psf->height);
     fits_read_col(fits, TDOUBLE, 1, 1, 1, psf->ncoeffs*psf->width*psf->height, NULL, psf->C, NULL, &status);
@@ -51,6 +61,9 @@ psf_str *psf_create(char *filename)
     /* Shift the origin by 1 pixel, as PSFEx origin is 1,1 */
     psf->x0 -= 1;
     psf->y0 -= 1;
+
+    /* dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm); */
+    /* dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy); */
 
     return psf;
 }
@@ -360,10 +373,10 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
 
     file = fopen(param_filename, "w");
     fprintf(file,
-            "VIGNET(40,40)\n"
+            "VIGNET(%d,%d)\n"
             "X_IMAGE\nY_IMAGE\n"
             "FLUX_RADIUS\nFLUX_APER\nFLUXERR_APER\n"
-            "ELONGATION\nFLAGS\nFLUX_MAX\nSNR_WIN\n");
+            "ELONGATION\nFLAGS\nFLUX_MAX\nSNR_WIN\n", psf_vignet_size, psf_vignet_size);
     fclose(file);
 
     system_run_silently("sex %s -c %s"
@@ -371,14 +384,17 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
                         " -FILTER Y -FILTER_NAME %s"
                         " -CLEAN Y -VERBOSE_TYPE QUIET"
                         " -DETECT_THRESH 3"
+                        " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
                         " -CATALOG_NAME %s",
-                        filename, empty_filename, param_filename, filter_filename, cat_filename);
+                        filename, empty_filename, param_filename, filter_filename,
+                        psf_gain, psf_satur_level, psf_phot_aper, cat_filename);
 
     /* PSFEx part */
     system_run_silently("psfex %s -c %s -OUTCAT_NAME %s"
-                        " -PSFVAR_DEGREES 4 -PSF_RECENTER Y -PSF_SIZE 25,25 -PSFVAR_NSNAP 20"
+                        " -PSFVAR_DEGREES %d -PSF_SIZE %d,%d -PSF_RECENTER Y -PSF_RECENTER Y -PSFVAR_NSNAP 20"
                         " -NTHREADS 0 -CHECKIMAGE_TYPE NONE -VERBOSE_TYPE QUIET -WRITE_XML N",
-                        cat_filename, empty_filename, psf_name);
+                        cat_filename, empty_filename, psf_name,
+                        psf_var_degree, psf_size, psf_size);
 
     if(file_exists_and_normal(psf_name)){
         psf = psf_create(psf_name);
@@ -412,10 +428,11 @@ image_str *image_smooth_psf(image_str *image, psf_str *psf)
     image_str *res = image_create_double(image->width, image->height);
     int x;
     int y;
-    int step = 8;
+    int step = 16;
     int size = floor(0.5*psf->width*psf->pix_step);
     double saturation = image_max_value(image);
 
+#pragma omp parallel for private(x)
     for(y = 0; y < image->height; y += step){
         /* if(isatty(fileno(stderr))) */
         /*     dprintf("PSF smoothing: %d / %d\t\r", y, image->height); */
@@ -432,6 +449,9 @@ image_str *image_smooth_psf(image_str *image, psf_str *psf)
                     int y1 = 0;
                     double value = 0;
                     double kernel_sum = 0;
+
+                    if(x + dx >= image->width || y + dy >= image->height)
+                        continue;
 
                     for(x1 = MAX(0, x+dx-size); x1 < MIN(image->width, x+dx+size+1); x1++)
                         for(y1 = MAX(0, y+dy-size); y1 < MIN(image->height, y+dy+size+1); y1++){

@@ -7,9 +7,9 @@ GDEBUG   = -g
 OPTIMIZE = -O2 -msse4 -ffast-math
 INCLUDES = -I.
 THREADED = -D_REENTRANT -D_GNU_SOURCE -DCORO_UCONTEXT -D_XOPEN_SOURCE
-FLAGS    = -Wall -fPIC -fms-extensions -fno-strict-aliasing
+FLAGS    = -Wall -fPIC -fms-extensions -fno-strict-aliasing -fopenmp
 CFLAGS   = $(FLAGS) $(THREADED) $(GDEBUG) $(DEBUG) $(OPTIMIZE) $(INCLUDES)
-LDLIBS  = -L. -lm -lcfitsio -lpthread
+LDLIBS  = -L. -lm -lcfitsio -lpthread -lgomp
 
 ifeq ($(shell uname), Linux)
 LDLIBS  += -ltcmalloc -lcrypt

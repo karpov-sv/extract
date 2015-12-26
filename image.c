@@ -440,6 +440,7 @@ image_str *image_smooth(image_str *image, double sigma)
             PIXEL_DOUBLE(kernel, x + size, y + size) = value;
         }
 
+#pragma omp parallel for private(x)
     for(y = 0; y < image->height; y++)
         for(x = 0; x < image->width; x++){
             int x1 = 0;

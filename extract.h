@@ -12,6 +12,8 @@
 typedef struct peak_str {
     LIST_HEAD(struct peak_str);
 
+    int id;
+
     double x;
     double dx;
 
@@ -39,11 +41,12 @@ typedef struct peak_str {
     int state;
 } peak_str;
 
-void find_peaks(image_str *, image_str *, struct list_head *);
+void find_peaks(image_str *, image_str *, image_str *, double , struct list_head *);
 
 void dump_peaks_to_file(struct list_head *, char *);
 void dump_peaks_to_file_measured(struct list_head *, char *);
 void dump_peaks_to_file_failed(struct list_head *, char *);
+void dump_peaks_to_file_initial(struct list_head *, char *);
 void dump_peaks_to_file_full(struct list_head *, char *);
 
 #endif /* EXTRACT_H */

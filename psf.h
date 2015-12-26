@@ -3,6 +3,13 @@
 
 #include "image.h"
 
+int psf_var_degree;
+int psf_vignet_size;
+int psf_size;
+double psf_gain;
+double psf_satur_level;
+double psf_phot_aper;
+
 typedef struct {
     /* Scaling */
     double x0;

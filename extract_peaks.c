@@ -13,10 +13,6 @@ static int dx[] = {0, 0,  0, 1, 1,  1, -1, -1, -1};
 static int dy[] = {0, 1, -1, 1, 0, -1,  1,  0, -1};
 static int dN = 9;
 
-static int dx5[] = {0, 0,  0, 1, -1};
-static int dy5[] = {0, 1, -1, 0, 0};
-static int dN5 = 5;
-
 #define IS_PIXEL_VALID(image, x, y) ((x) >= 0 && (x) < (image)->width && (y) >= 0 && (y) < (image)->height)
 
 /* Single image pixel */
@@ -93,175 +89,6 @@ static inline void get_reachable_maximum_xy(image_str *image, image_str *mask, i
     *y_ptr = y;
 }
 
-region_str *extract_region(image_str *image, image_str *smooth, image_str *mask, int x0, int y0, double threshold)
-{
-    region_str *region = (region_str *)calloc(1, sizeof(region_str));
-    int stack_length = 100;
-    int stack_pos = 0;
-    int *stack_x = (int *)malloc(stack_length*sizeof(int));
-    int *stack_y = (int *)malloc(stack_length*sizeof(int));
-    int x = x0;
-    int y = y0;
-
-    double bg_sum = 0;
-    double bg_sum2 = 0;
-
-    pixel_str *pixel = NULL;
-
-    /* dprintf("\n%d %d - %g\n", x0, y0, threshold); */
-
-    init_list(region->pixels);
-
-    region->npixels = 0;
-    region->npixels_bg = 0;
-
-    region->is_edge = FALSE;
-    region->is_noise = FALSE;
-
-    region->min_flux = PIXEL_DOUBLE(image, x, y);
-    region->max_flux = PIXEL_DOUBLE(image, x, y);
-    region->mean_flux = 0;
-
-    region->bg_mean = 0;
-    region->bg_sigma = 0;
-
-    inline void claim_pixel(x, y)
-    {
-        pixel_str *pixel = (pixel_str *)malloc(sizeof(pixel_str));
-
-        PIXEL(mask, x, y) = TRUE;
-
-        pixel->x = x;
-        pixel->y = y;
-
-        pixel->flux = PIXEL_DOUBLE(image, x, y);
-        pixel->flux_err = 0;//
-
-        pixel->is_edge = FALSE;
-
-        region->min_flux = MIN(region->min_flux, pixel->flux);
-        region->max_flux = MAX(region->max_flux, pixel->flux);
-        region->mean_flux += pixel->flux;
-
-        add_to_list(region->pixels, pixel);
-
-        region->npixels ++;
-    }
-
-    claim_pixel(x, y);
-
-    /* Recursive descent */
-    while(TRUE){
-        int i = 0;
-        double value0 = PIXEL_DOUBLE(smooth, x, y);
-        int Nadded = 0;
-
-        /* Find and claim all destinations leading down from this point */
-        for(i = 1; i < dN5; i++){
-            int x1 = x + dx5[i];
-            int y1 = y + dy5[i];
-
-            if(IS_PIXEL_VALID(smooth, x1, y1) && !PIXEL(mask, x1, y1)){
-                if((PIXEL_DOUBLE(smooth, x1, y1) <= value0 + 1e-10) ||
-                   (threshold > 0 && PIXEL_DOUBLE(smooth, x1, y1) >= threshold + 1e-10)){
-                    if(stack_pos == stack_length){
-                        stack_length *= 2;
-                        stack_x = realloc(stack_x, sizeof(int)*stack_length);
-                        stack_y = realloc(stack_y, sizeof(int)*stack_length);
-                    }
-
-                    claim_pixel(x1, y1);
-
-                    stack_x[stack_pos] = x1;
-                    stack_y[stack_pos] = y1;
-
-                    stack_pos ++;
-
-                    Nadded ++;
-                }
-            } else
-                region->is_edge = TRUE;
-        }
-
-        /* Go to the stack upper point, if any */
-        if(stack_pos > 0){
-            stack_pos --;
-            x = stack_x[stack_pos];
-            y = stack_y[stack_pos];
-        } else
-            /* Processed all points */
-            break;
-    }
-
-    foreach(pixel, region->pixels){
-        int i;
-
-        pixel->is_edge = FALSE;
-
-        for(i = 1; i < dN; i++){
-            int x1 = pixel->x + dx[i];
-            int y1 = pixel->y + dy[i];
-
-            if(IS_PIXEL_VALID(smooth, x1, y1) && !PIXEL(mask, x1, y1)){
-                pixel->is_edge = TRUE;
-                bg_sum += pixel->flux;
-                bg_sum2 += pixel->flux*pixel->flux;
-                region->npixels_bg ++;
-
-                break;
-            }
-        }
-    }
-
-    region->mean_flux /= region->npixels;
-
-    region->bg_mean = bg_sum/region->npixels_bg;
-    region->bg_sigma = sqrt((bg_sum2 - bg_sum*bg_sum/region->npixels_bg)/(region->npixels_bg - 1));
-
-    foreach(pixel, region->pixels){
-        PIXEL(mask, pixel->x, pixel->y) = FALSE;
-    }
-
-    free(stack_x);
-    free(stack_y);
-
-    /* dprintf("%d pixels, %d bg, %g %g\n", region->npixels, region->npixels_bg, region->bg_mean, region->bg_sigma); */
-
-    if(!threshold && region->npixels_bg > 10){
-        threshold = region->bg_mean + 3.0*region->bg_sigma;
-
-        if(isfinite(threshold) && threshold > 0){
-            free_list(region->pixels);
-            free(region);
-
-            region = extract_region(image, smooth, mask, x0, y0, threshold);
-        }
-    }
-
-    return region;
-}
-
-void mask_region(image_str *mask, region_str *region)
-{
-    pixel_str *pixel = NULL;
-
-    foreach(pixel, region->pixels)
-        if(!pixel->is_edge){
-            PIXEL(mask, pixel->x, pixel->y) = TRUE;
-        }
-}
-
-void dump_region(region_str *region, char *filename)
-{
-    FILE *file = fopen(filename, "w");
-    pixel_str *pixel = NULL;
-
-    foreach(pixel, region->pixels)
-        fprintf(file, "%d %d %g %g %d\n", pixel->x, pixel->y, pixel->flux, pixel->flux - region->bg_mean, pixel->is_edge);
-
-    fclose(file);
-}
-
 static peak_str *peak_from_region(region_str *region)
 {
     peak_str *peak = (peak_str *)calloc(1, sizeof(peak_str));
@@ -274,6 +101,7 @@ static peak_str *peak_from_region(region_str *region)
     double sum_xy = 0;
     double sum_weight = 0;
     double sum_flux = 0;
+    double sum_flux_err = 0;
     pixel_str *pixel;
 
     double X2 = 0;
@@ -296,6 +124,7 @@ static peak_str *peak_from_region(region_str *region)
             sum_weight += value;
 
             sum_flux += value;//pixel->flux - bg;
+            sum_flux_err += pixel->flux_err*pixel->flux_err;
 
             N ++;
         }
@@ -317,11 +146,19 @@ static peak_str *peak_from_region(region_str *region)
     peak->y = sum_y/sum_weight;
 
     peak->flux = sum_flux; /* In principle it may be negative */
+    peak->dflux = sqrt(sum_flux_err);
 
     peak->bg = bg;
 
     /* Rough estimate of peak significance */
-    peak->excess = peak->flux/region->bg_sigma/sqrt(region->npixels);
+    peak->excess = peak->flux/peak->dflux;
+    /* if(region->bg_sigma > 0) */
+    /*     peak->excess = peak->flux/region->bg_sigma/sqrt(region->npixels); */
+    /* else */
+    /*     peak->excess = 0; */
+
+    /* if(peak->excess > 5.0) */
+    /*     dprintf("%g - %g %g %d\n", peak->excess, peak->flux, region->bg_sigma, region->npixels); */
 
     peak->A = region->max_flux - region->min_flux; /* Conservative estimate for peak amplitude, always positive */
 
@@ -348,7 +185,7 @@ static peak_str *peak_from_region(region_str *region)
     return peak;
 }
 
-static inline void add_pixel_to_region(int x, int y, region_str *region, image_str *image, image_str *smooth, region_str **map)
+static inline void add_pixel_to_region(int x, int y, region_str *region, image_str *image, image_str *smooth, image_str *errors, region_str **map)
 {
     pixel_str *pixel = (pixel_str *)malloc(sizeof(pixel_str));
 
@@ -358,7 +195,7 @@ static inline void add_pixel_to_region(int x, int y, region_str *region, image_s
     pixel->y = y;
 
     pixel->flux = PIXEL_DOUBLE(image, x, y);
-    pixel->flux_err = 0;//
+    pixel->flux_err = PIXEL_DOUBLE(errors, x, y);
 
     pixel->smooth = PIXEL_DOUBLE(smooth, x, y);
 
@@ -383,6 +220,9 @@ static void update_region_stats(region_str *region, image_str *image, region_str
     region->bg_mean = 0;
     region->bg_sigma = 0;
 
+    region->max = NULL;
+    region->saddle = NULL;
+
     foreach(pixel, region->pixels){
         int i;
 
@@ -400,7 +240,7 @@ static void update_region_stats(region_str *region, image_str *image, region_str
             int x1 = pixel->x + dx[i];
             int y1 = pixel->y + dy[i];
 
-            if(IS_PIXEL_VALID(image, x1, y1) && map[x1 + y1*image->width] != region){
+            if(IS_PIXEL_VALID(image, x1, y1) && map[x1 + y1*image->width] && map[x1 + y1*image->width] != region){
                 pixel->is_edge = TRUE;
                 bg_sum += pixel->flux;
                 bg_sum2 += pixel->flux*pixel->flux;
@@ -444,7 +284,21 @@ static void update_region_stats(region_str *region, image_str *image, region_str
     }
 }
 
-void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
+static void dump_region_a(region_str *region, char *filename)
+{
+    FILE *file = fopen(filename, "a");
+    pixel_str *pixel = NULL;
+
+    foreach(pixel, region->pixels)
+        if(pixel != region->saddle)
+            fprintf(file, "%d %d %g %g %d\n", pixel->x, pixel->y, pixel->flux, pixel->flux - region->bg_mean, pixel->is_edge);
+        else
+            fprintf(file, "%d %d %g %g %d\n", pixel->x, pixel->y, pixel->flux, pixel->flux - region->bg_mean, 2);
+
+    fclose(file);
+}
+
+void find_peaks(image_str *image, image_str *smooth, image_str *errors, double threshold, struct list_head *peaks)
 {
     region_str **map = (region_str **)calloc(image->width*image->height, sizeof(region_str *));
     struct list_head regions;
@@ -462,7 +316,7 @@ void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
         for(x = 0; x < smooth->width; x++){
             int d;
 
-            if(!map[x + y*image->width] && PIXEL(smooth, x, y) > 0){
+            if(!map[x + y*image->width] && PIXEL_DOUBLE(smooth, x, y) > 1.5*PIXEL_DOUBLE(errors, x, y)){
                 int x0;
                 int y0;
 
@@ -475,11 +329,11 @@ void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
                     init_list(region->pixels);
                     add_to_list(regions, region);
 
-                    add_pixel_to_region(x0, y0, region, image, smooth, map);
+                    add_pixel_to_region(x0, y0, region, image, smooth, errors, map);
                 }
 
                 if(x != x0 || y != y0)
-                    add_pixel_to_region(x, y, region, image, smooth, map);
+                    add_pixel_to_region(x, y, region, image, smooth, errors, map);
             }
         }
 
@@ -489,12 +343,114 @@ void find_peaks(image_str *image, image_str *smooth, struct list_head *peaks)
         update_region_stats(region, image, map);
 
     foreach(region, regions){
+        int is_merged = FALSE;
+
+        /* do { */
+        /*     is_merged = FALSE; */
+
+        /*     if(region->max->is_edge){ */
+        /*         int x0 = region->saddle->x; */
+        /*         int y0 = region->saddle->y; */
+        /*         int i; */
+        /*         int id = 0; */
+        /*         double max = 0; */
+
+        /*         for(i = 1; i < dN; i++){ */
+        /*             if(IS_PIXEL_VALID(image, x0+dx[i], y0+dy[i]) /\* && map[x0+dx[i] + (y0+dy[i])*image->width] != region *\/){ */
+        /*                 if(!id || PIXEL_DOUBLE(smooth, x0+dx[i], y0+dy[i]) > max){ */
+        /*                     id = i; */
+        /*                     max = PIXEL_DOUBLE(smooth, x0+dx[i], y0+dy[i]); */
+        /*                 } */
+        /*             } */
+        /*         } */
+
+        /*         if(id){ */
+        /*             region_str *r = map[x0+dx[id] + (y0+dy[id])*image->width]; */
+
+        /*             if(r && r != region){ */
+        /*                 pixel_str *pixel = NULL; */
+
+        /*                 foreach(pixel, r->pixels) */
+        /*                     add_pixel_to_region(pixel->x, pixel->y, region, image, smooth, errors, map); */
+
+        /*                 del_from_list(r); */
+        /*                 free_list(r->pixels); */
+        /*                 free(r); */
+
+        /*                 is_merged = TRUE; */
+
+        /*                 update_region_stats(region, image, map); */
+        /*             } */
+        /*         } */
+        /*     } */
+        /* } while(is_merged); */
+
+        while(region->saddle){
+            int x0 = region->saddle->x;
+            int y0 = region->saddle->y;
+            int i;
+
+            is_merged = FALSE;
+
+            for(i = 1; i < dN; i++)
+                if(IS_PIXEL_VALID(image, x0+dx[i], y0+dy[i]) &&
+                   map[x0+dx[i] + (y0+dy[i])*image->width] &&
+                   map[x0+dx[i] + (y0+dy[i])*image->width] != region){
+                    region_str *r = map[x0+dx[i] + (y0+dy[i])*image->width];
+
+                    //dprintf("%d %d - %g - %i - %g\n", x0, y0, region->prominence, i, r->prominence);
+
+                    /* if(r->max_flux - r->bg_mean < region->max_flux - region->bg_mean) */
+                    /*     dprintf("%d %d - %d %d - %g\n", region->max->x, region->max->y, r->max->x, r->max->y, */
+                    /*             (r->max_flux - r->saddle->flux)/(region->max_flux - region->bg_mean)); */
+
+                    if((region->max_flux - region->saddle->flux)/(region->max_flux - 0*region->bg_mean) < 0.5 ||
+                       (r->max_flux - r->saddle->flux)/(r->max_flux - 0*r->min_flux) < 0.5){
+                        pixel_str *pixel = NULL;
+
+                        /* dprintf("merging %d %d into %d %d - %g\n", r->max->x, r->max->y, region->max->x, region->max->y, */
+                        /*         (r->max_flux - r->saddle->flux)/(region->max_flux - region->min_flux)); */
+                        foreach(pixel, r->pixels)
+                            add_pixel_to_region(pixel->x, pixel->y, region, image, smooth, errors, map);
+
+                        del_from_list(r);
+                        free_list(r->pixels);
+                        free(r);
+
+                        is_merged = TRUE;
+
+                        update_region_stats(region, image, map);
+                    } else {
+                        /* dprintf("not merging %d %d into %d %d - %g\n", r->max->x, r->max->y, region->max->x, region->max->y, */
+                        /*         (r->max_flux - r->saddle->flux)/(region->max_flux - region->min_flux)); */
+                    }
+
+                    /* dprintf("%d %d: min %g max %g N %d Nbg %d\n", */
+                    /*         region->max->x, region->max->y, region->min_flux, region->max_flux, */
+                    /*         region->npixels, region->npixels_bg); */
+                }
+
+            if(!is_merged)
+                break;
+        }
+    }
+
+    dprintf("%d regions after merging\n", list_length(&regions));
+
+    system("rm -f out.all.txt");
+
+    foreach(region, regions){
         peak_str *peak = NULL;
 
         peak = peak_from_region(region);
 
-        if(peak->excess > 3.0 && region->npixels - region->npixels_bg > 1 &&
+        if(peak->excess > threshold){
+            dump_region_a(region, "out.all.txt");
+        }
+
+        if(peak->excess > threshold && /* region->npixels - region->npixels_bg > 10 && */
            /* region->max_flux - region->bg_mean > 5.0*region->bg_sigma && */ TRUE){
+            peak->id = Ntotal++;
             add_to_list(*peaks, peak);
         } else
             free(peak);
@@ -549,13 +505,27 @@ void dump_peaks_to_file_failed(struct list_head *peaks, char *filename)
         fclose(file);
 }
 
+void dump_peaks_to_file_initial(struct list_head *peaks, char *filename)
+{
+    FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
+    peak_str *peak = NULL;
+
+    foreach(peak, *peaks){
+        if(peak->state == PEAK_INITIAL)
+            fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess);
+    }
+
+    if(file != stdout)
+        fclose(file);
+}
+
 void dump_peaks_to_file_full(struct list_head *peaks, char *filename)
 {
     FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
     peak_str *peak = NULL;
 
     foreach(peak, *peaks){
-        fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess);
+        fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g %d\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess, peak->id);
     }
 
     if(file != stdout)
