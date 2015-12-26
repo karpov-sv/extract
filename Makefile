@@ -24,6 +24,7 @@ LDLIBS += `pkg-config --libs glib-2.0`
 
 TARGETS = \
 	extract \
+	test_sky \
 
 LIBFAVOR_OBJS = \
 	utils.o \
@@ -36,6 +37,7 @@ LIBFAVOR_OBJS = \
 	kdtree.o \
 	psf.o \
 	mpfit.o \
+	random.o \
 
 EXTRACT_OBJS = \
 	extract.o \
