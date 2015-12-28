@@ -92,6 +92,8 @@ int main(int argc, char **argv)
 
             if(isatty(fileno(stderr)))
                 dprintf("\r %d / %d - %.2lf %.2lf - %g             \r", d, N, x0, y0, A);
+
+            image_delete(kernel);
         }
 
         if(isatty(fileno(stderr)))
