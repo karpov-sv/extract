@@ -583,9 +583,9 @@ void psf_fit_peaks(image_str *image, image_str *errors, psf_str *psf, double thr
         dprintf("\n");
 
     if(debug){
-        dump_peaks_to_file_measured(peaks, "out.peaks.result.txt");
-        dump_peaks_to_file_failed(peaks, "out.peaks.failed.txt");
-        dump_peaks_to_file_initial(peaks, "out.peaks.initial.txt");
+        dump_peaks_to_file(peaks, "out.peaks.result.txt", PEAK_MEASURED);
+        dump_peaks_to_file(peaks, "out.peaks.failed.txt", PEAK_FAILED);
+        dump_peaks_to_file(peaks, "out.peaks.initial.txt", PEAK_INITIAL);
 
         subtract_peaks_from_image(image, psf, peaks, size);
         image_dump_to_fits(image, "out.residuals.fits");
@@ -652,8 +652,9 @@ int main(int argc, char **argv)
     char *outname = NULL;
     char *darkname = NULL;
     char *flatname = NULL;
-    char *tmpname = NULL;
+    char *maskname = NULL;
     char *simplename = NULL;
+    char *preprocessedname = NULL;
     int x0 = 0;
     int y0 = 0;
     int width = 0;
@@ -664,15 +665,26 @@ int main(int argc, char **argv)
     int is_gauss = FALSE;
     int is_keep_psf = FALSE;
     int is_keep_simple = FALSE;
+    int is_keep_preprocessed = FALSE;
+    int is_keep_mask = FALSE;
     int is_unsharp = FALSE;
     int is_header = FALSE;
+
+    int is_preprocessed = FALSE;
 
     double bias = 0.0;
     double gain = 0.0;
     double readnoise = 0.0;
     double threshold = 5.0;
 
+    double saturation = 0.0;
+    double welldepth = 23000.0;
+
     double max_fwhm = 6.0;
+
+    image_str *image = NULL;
+    image_str *mask = NULL;
+    psf_str *psf = NULL;
 
     parse_args(argc, argv,
                "x0=%d", &x0,
@@ -685,6 +697,8 @@ int main(int argc, char **argv)
                "-gauss", &is_gauss,
                "-keep_psf", &is_keep_psf,
                "-keep_simple", &is_keep_simple,
+               "-keep_preprocessed", &is_keep_preprocessed,
+               "-keep_mask", &is_keep_mask,
                "-unsharp", &is_unsharp,
                "-header", &is_header,
                "-debug", &debug,
@@ -695,6 +709,9 @@ int main(int argc, char **argv)
                "gain=%lf", &gain,
                "readnoise=%lf", &readnoise,
                "threshold=%lf", &threshold,
+
+               "saturation=%lf", &saturation,
+               "welldepth=%lf", &welldepth,
 
                "max_fwhm=%lf", &max_fwhm,
 
@@ -707,6 +724,7 @@ int main(int argc, char **argv)
 
                "dark=%s", &darkname,
                "flat=%s", &flatname,
+               "mask=%s", &maskname,
 
                "%s", &filename,
                "%s", &outname,
@@ -715,56 +733,113 @@ int main(int argc, char **argv)
     if(!filename)
         return EXIT_SUCCESS;
 
-    if(is_header && !gain){
-        image_str *image = image_create_from_fits(filename);
+    image = image_create_from_fits(filename);
 
-        if(image){
-            if(image_keyword_find(image, "GAIN")){
-                gain = image_keyword_get_double(image, "GAIN");
+    if(!image){
+        dprintf("Can't load FITS image from %s!\n", filename);
+        return EXIT_FAILURE;
+    } else if(image->type != IMAGE_DOUBLE){
+        /* The code expects IMAGE_DOUBLE */
+        image_str *new = image_convert_to_double(image);
 
-                dprintf("Setting GAIN to %g from GAIN header keyword\n", gain);
-            }
+        image_delete(image);
+        image = new;
 
-            if(image_keyword_find(image, "SHUTTER")){
-                if(image_keyword_get_int(image, "SHUTTER") == 0)
-                    gain = 0.67;
-                else
-                    gain = 1.91;
-
-                dprintf("Setting GAIN to %g from SHUTTER header keyword\n", gain);
-
-                psf_satur_level = 20000.0/gain;
-
-                dprintf("Setting SATUR_LEVEL to %g from 23000 depth well capacity\n", psf_satur_level);
-            }
-
-            image_delete(image);
-        }
+        dprintf("Image converted to DOUBLE\n");
     }
 
+    dprintf("%s: %d x %d, min = %g, max = %g, mean = %g, sigma = %g\n", filename, image->width, image->height,
+            image_min_value(image), image_max_value(image), image_mean(image), image_sigma(image));
+
+    /* If no GAIN provided on command line, try to guess it from the header */
+    if(is_header && !gain){
+        if(image_keyword_find(image, "GAIN")){
+            gain = image_keyword_get_double(image, "GAIN");
+
+            dprintf("Setting GAIN to %g from GAIN header keyword\n", gain);
+        }
+
+        if(image_keyword_find(image, "SHUTTER")){
+            if(image_keyword_get_int(image, "SHUTTER") == 0){
+                gain = 0.67;
+                readnoise = 1.4;
+            } else {
+                gain = 1.91;
+                readnoise = 2.46;
+            }
+
+            dprintf("Setting GAIN to %g and READNOISE to %g from SHUTTER header keyword\n", gain, readnoise);
+        }
+
+        if(image_keyword_find(image, "AVERAGED")){
+            int avg = MAX(1, image_keyword_get_int(image, "AVERAGED"));
+
+            gain *= avg;
+            readnoise /= sqrt(avg);
+            welldepth *= avg;
+
+            dprintf("The image was AVERAGED over %d frames, corrected the parameters correspondingly\n", avg);
+        }
+
+        /* TODO: estimate the saturation level here */
+    }
+
+    if(!saturation){
+        saturation = welldepth/gain;
+
+        dprintf("Setting SATURATION to %g from %g depth well capacity\n", saturation, welldepth);
+    }
+
+    /* Fill PSFEx parameters */
     if(gain && !psf_gain)
         psf_gain = gain;
 
-    if(!psfname)
+    if(saturation)
+        psf_satur_level = saturation;
+
+    dprintf("bias=%g gain=%g readnoise=%g saturation=%g\n", bias, gain, readnoise, saturation);
+
+    /* Various filenames */
+    if(is_psfex && outname)
+        psfname = outname;
+    else if(!psfname)
         psfname = make_string("%s.psf", filename);
 
     simplename = make_string("%s.simple", filename);
+    preprocessedname = make_string("%s.processed.fits", filename);
 
-    /* Pre-process the image */
-    if(filename && darkname){
-        image_str *image = image_create_from_fits(filename);
-        image_str *dark = image_create_from_fits(darkname);
-        image_str *flat = flatname ? image_create_from_fits(flatname) : NULL;
-        char *newname = make_temp_filename("/tmp/img_processed_XXXXXX");
+    /* MASK holding saturation/error flags */
+    if(maskname){
+        mask = image_create_from_fits(maskname);
+
+        if(mask)
+            dprintf("MASK frame read from %s\n", maskname);
+    } else {
+        mask = image_create(image->width, image->height);
+    }
+
+    /* We should mask saturated pixels before dark/flat corrections */
+    {
         int d;
 
-        if(image->type != IMAGE_DOUBLE){
-            /* The code expects IMAGE_DOUBLE */
-            image_str *new = image_convert_to_double(image);
+        for(d = 0; d < image->width*image->height; d++)
+            if(image->double_data[d] >= saturation)
+                mask->data[d] = FLAG_SATURATED;
 
-            image_delete(image);
-            image = new;
+        if(is_keep_mask){
+            maskname = make_string("%s.mask.fits", filename);
+
+            image_dump_to_fits(mask, maskname);
         }
+
+        dprintf("Saturated pixels masked\n");
+    }
+
+    /* Pre-process the image if DARK and FLAT are provided */
+    if(darkname){
+        image_str *dark = image_create_from_fits(darkname);
+        image_str *flat = flatname ? image_create_from_fits(flatname) : NULL;
+        int d;
 
         if(dark)
             dprintf("DARK frame read from %s\n", darkname);
@@ -780,11 +855,10 @@ int main(int argc, char **argv)
                 image->double_data[d] = image->double_data[d] - dark->double_data[d];
         }
 
-        image_dump_to_fits(image, newname);
-
-        dprintf("Working on processed temporary file %s\n", newname);
-
-        image_delete(image);
+        /* Make saturated pixels saturated */
+        for(d = 0; d < image->width*image->height; d++)
+            if(mask->data[d] & FLAG_SATURATED)
+                image->double_data[d] = saturation;
 
         if(dark)
             image_delete(dark);
@@ -792,59 +866,58 @@ int main(int argc, char **argv)
         if(flat)
             image_delete(flat);
 
-        filename = newname;
+        if(is_keep_preprocessed)
+            image_dump_to_fits(image, preprocessedname);
+
+        is_preprocessed = TRUE;
+        dprintf("Image pre-processed\n");
     }
 
-    if(is_psfex){
-        psf_str *psf = NULL;
-
-        if(!outname)
-            outname = make_string("%s.psf", filename);
-
-        psf = psf_create_from_fits_and_save(filename, outname);
-
-        dprintf("PSF for %s created and stored to %s\n", filename, outname);
-
-        psf_delete(psf);
+    if(file_exists_and_normal(psfname) && !is_psfex){
+        dprintf("Loading PSF from PSFEx file %s\n", psfname);
+        psf = psf_create(psfname);
     } else {
-        image_str *image = image_create_from_fits(filename);
+        char *tmpname = filename;
+
+        if(psfname && !is_psfex)
+            dprintf("Can't find file %s\n", psfname);
+
+        if(is_preprocessed){
+            tmpname = make_temp_filename("/tmp/img_processed_XXXXXX");
+            image_dump_to_fits(image, tmpname);
+        }
+
+        dprintf("Extracting PSF from FITS file %s\n", tmpname);
+
+        if(is_keep_psf || is_psfex){
+            psf = psf_create_from_fits_and_save(tmpname, psfname);
+            dprintf("PSF for %s created and stored to %s\n", tmpname, psfname);
+        } else {
+            psf = psf_create_from_fits(tmpname);
+            dprintf("PSF for %s created\n", tmpname);
+        }
+
+        if(is_preprocessed)
+            unlink(tmpname);
+
+        if(is_psfex)
+            return EXIT_SUCCESS;
+    }
+
+    dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
+    /* dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy); */
+
+    if(psf->fwhm <= 0){
+        dprintf("Bad PSF FWHM!\n");
+        return EXIT_FAILURE;
+    } else if(max_fwhm > 0 && psf->fwhm > max_fwhm){
+        dprintf("PSF FWHM is too large!\n");
+        return EXIT_FAILURE;
+    } else {
+        /* Main processing code */
         image_str *smooth = NULL;
         image_str *errors = NULL;
         struct list_head peaks;
-        psf_str *psf = NULL;
-
-        if(file_exists_and_normal(psfname)) {
-            dprintf("Loading PSF from PSFEx file %s\n", psfname);
-            psf = psf_create(psfname);
-        } else {
-            if(psfname)
-                dprintf("Can't find file %s\n", psfname);
-            dprintf("Extracting PSF from FITS file %s\n", filename);
-
-            if(is_keep_psf){
-                psf = psf_create_from_fits_and_save(filename, psfname);
-                dprintf("PSF for %s created and stored to %s\n", filename, psfname);
-            } else {
-                psf = psf_create_from_fits(filename);
-                dprintf("PSF for %s created\n", filename);
-            }
-        }
-
-        dprintf("PSF: %d x %d, degree = %d, FWHM=%g\n", psf->width, psf->height, psf->degree, psf->fwhm);
-        dprintf("PSF: x0=%g sx=%g y0=%g sy=%g\n", psf->x0, psf->sx, psf->y0, psf->sy);
-
-        if(psf->fwhm <= 0){
-            dprintf("Bad PSF FWHM!\n");
-                return EXIT_FAILURE;
-        }
-
-        if(image->type != IMAGE_DOUBLE){
-            /* The code expects IMAGE_DOUBLE */
-            image_str *new = image_convert_to_double(image);
-
-            image_delete(image);
-            image = new;
-        }
 
         if(is_gauss){
             dprintf("Unsharping using Gaussian\n");
@@ -866,6 +939,7 @@ int main(int argc, char **argv)
         if(width > 0 && height > 0){
             image = image_crop(image, x0, y0, x0 + width, y0 + height);
             smooth = image_crop(smooth, x0, y0, x0 + width, y0 + height);
+            mask = image_crop(mask, x0, y0, x0 + width, y0 + height);
         }
 
         if(gain > 0)
@@ -877,7 +951,7 @@ int main(int argc, char **argv)
 
         dprintf("Extracting initial peaks\n");
 
-        find_peaks(image, smooth, errors, threshold, &peaks);
+        find_peaks(image, smooth, errors, mask, threshold, &peaks);
 
         dprintf("%d image peaks found\n", list_length(&peaks));
 
@@ -885,28 +959,23 @@ int main(int argc, char **argv)
             image_dump_to_fits(image, "out.image.fits");
             image_dump_to_fits(errors, "out.errors.fits");
             image_dump_to_fits(smooth, "out.smooth.fits");
+            image_dump_to_fits(mask, "out.mask.fits");
 
-            dump_peaks_to_file_full(&peaks, "out.peaks.full.txt");
+            dump_peaks_to_file(&peaks, "out.peaks.full.txt", PEAK_INITIAL | PEAK_MEASURED | PEAK_FAILED);
         }
 
         if(is_simple){
-            dump_peaks_to_file_full(&peaks, outname);
+            dump_peaks_to_file(&peaks, outname, PEAK_INITIAL | PEAK_MEASURED | PEAK_FAILED);
 
             if(debug)
-                dump_peaks_to_file_full(&peaks, "out.peaks.result.txt");
+                dump_peaks_to_file(&peaks, "out.peaks.result.txt", PEAK_INITIAL | PEAK_MEASURED | PEAK_FAILED);
         } else {
+            int d;
+
             if(is_keep_simple){
-                dump_peaks_to_file_full(&peaks, simplename);
+                dump_peaks_to_file(&peaks, simplename, PEAK_INITIAL | PEAK_MEASURED | PEAK_FAILED);
 
                 dprintf("Initial peaks stored to %s\n", simplename);
-            }
-
-            dprintf("%s: %d x %d, min = %g, max = %g\n", filename, image->width, image->height,
-                    image_min_value(image), image_max_value(image));
-
-            if(max_fwhm > 0 && psf->fwhm > max_fwhm){
-                dprintf("PSF FWHM is too large!\n");
-                return EXIT_FAILURE;
             }
 
             if(width > 0 && height > 0){
@@ -914,23 +983,24 @@ int main(int argc, char **argv)
                 psf->y0 -= y0;
             }
 
+            /* Low weight for saturated pixels */
+            for(d = 0; d < image->width*image->height; d++)
+                if(mask->data[d] & FLAG_SATURATED)
+                    errors->double_data[d] = saturation;
+
             psf_fit_peaks(image, errors, psf, threshold, &peaks);
 
-            dump_peaks_to_file(&peaks, outname);
+            dump_peaks_to_file(&peaks, outname, PEAK_MEASURED);
         }
 
         free_list(peaks);
 
-        psf_delete(psf);
-
         image_delete(errors);
         image_delete(smooth);
-        image_delete(image);
     }
 
-    if(tmpname)
-        /* Delete temporary image file */
-        unlink(tmpname);
+    image_delete(image);
+    psf_delete(psf);
 
     return EXIT_SUCCESS;
 }

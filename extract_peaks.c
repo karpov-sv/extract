@@ -89,7 +89,7 @@ static inline void get_reachable_maximum_xy(image_str *image, image_str *mask, i
     *y_ptr = y;
 }
 
-static peak_str *peak_from_region(region_str *region)
+static peak_str *peak_from_region(region_str *region, image_str *mask)
 {
     peak_str *peak = (peak_str *)calloc(1, sizeof(peak_str));
 
@@ -110,25 +110,34 @@ static peak_str *peak_from_region(region_str *region)
 
     double bg = region->bg_mean + region->bg_sigma;
 
+    int flags = 0;
+
     foreach(pixel, region->pixels){
-        /* double value = pixel->flux - bg; */
         double value = pixel->smooth;
-        //value = MAX(0, value);
 
         if(value >= 1e-10){
-            sum_x += value*pixel->x;
-            sum_x2 += value*pixel->x*pixel->x;
-            sum_y += value*pixel->y;
-            sum_y2 += value*pixel->y*pixel->y;
-            sum_xy += value*pixel->x*pixel->y;
+            double x = pixel->x;
+            double y = pixel->y;
+
+            sum_x += value*x;
+            sum_x2 += value*x*x;
+            sum_y += value*y;
+            sum_y2 += value*y*y;
+            sum_xy += value*x*y;
             sum_weight += value;
 
-            sum_flux += value;//pixel->flux - bg;
+            sum_flux += value;
             sum_flux_err += pixel->flux_err*pixel->flux_err;
+
+            flags |= PIXEL(mask, pixel->x, pixel->y);
+            if(x == 0 || x == mask->width-1 || y == 0 || y == mask->height-1)
+                flags |= FLAG_TRUNCATED;
 
             N ++;
         }
     }
+
+    peak->flags = flags;
 
     if(sum_weight <= 0){
         peak->x = pixel->x;
@@ -298,7 +307,26 @@ static void dump_region_a(region_str *region, char *filename)
     fclose(file);
 }
 
-void find_peaks(image_str *image, image_str *smooth, image_str *errors, double threshold, struct list_head *peaks)
+void measure_peak(peak_str *peak, image_str *image)
+{
+    double flux = 0;
+    double flux_err = 0;
+    double r0 = 2;
+    int x;
+    int y;
+
+    for(x = MAX(floor(peak->x - r0), 0); x <= MIN(ceil(peak->x + r0), image->width - 1); x++)
+        for(y = MAX(floor(peak->y - r0), 0); y <= MIN(ceil(peak->y + r0), image->height - 1); y++)
+            if(hypot(x - peak->x, y - peak->y) < r0)
+                flux += PIXEL_DOUBLE(image, x, y);
+
+    if(flux > 0)
+        peak->flux = flux;
+    else
+        peak->excess = 0;
+}
+
+void find_peaks(image_str *image, image_str *smooth, image_str *errors, image_str *mask, double threshold, struct list_head *peaks)
 {
     region_str **map = (region_str **)calloc(image->width*image->height, sizeof(region_str *));
     struct list_head regions;
@@ -321,6 +349,10 @@ void find_peaks(image_str *image, image_str *smooth, image_str *errors, double t
                 int y0;
 
                 get_reachable_maximum_xy(smooth, NULL, x, y, &x0, &y0, 0);
+
+                if(mask && ((PIXEL(mask, x, y) & FLAG_BAD) || (PIXEL(mask, x0, y0) & FLAG_BAD)))
+                    /* Skip BAD pixels */
+                    continue;
 
                 region = map[x0 + y0*image->width];
 
@@ -438,13 +470,16 @@ void find_peaks(image_str *image, image_str *smooth, image_str *errors, double t
     dprintf("%d regions after merging\n", list_length(&regions));
 
     system("rm -f out.all.txt");
+    system("touch out.all.txt");
 
     foreach(region, regions){
         peak_str *peak = NULL;
 
-        peak = peak_from_region(region);
+        peak = peak_from_region(region, mask);
 
-        if(peak->excess > threshold){
+        measure_peak(peak, smooth);
+
+        if(peak->excess > threshold || TRUE){
             dump_region_a(region, "out.all.txt");
         }
 
@@ -463,69 +498,14 @@ void find_peaks(image_str *image, image_str *smooth, image_str *errors, double t
     free_list(regions);
 }
 
-void dump_peaks_to_file(struct list_head *peaks, char *filename)
+void dump_peaks_to_file(struct list_head *peaks, char *filename, int state)
 {
     FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
     peak_str *peak = NULL;
 
     foreach(peak, *peaks){
-        if(peak->state == PEAK_MEASURED)
-            fprintf(file, "%g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg);
-    }
-
-    if(file != stdout)
-        fclose(file);
-}
-
-void dump_peaks_to_file_measured(struct list_head *peaks, char *filename)
-{
-    FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
-    peak_str *peak = NULL;
-
-    foreach(peak, *peaks){
-        if(peak->state == PEAK_MEASURED)
-            fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess);
-    }
-
-    if(file != stdout)
-        fclose(file);
-}
-
-void dump_peaks_to_file_failed(struct list_head *peaks, char *filename)
-{
-    FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
-    peak_str *peak = NULL;
-
-    foreach(peak, *peaks){
-        if(peak->state == PEAK_FAILED)
-            fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess);
-    }
-
-    if(file != stdout)
-        fclose(file);
-}
-
-void dump_peaks_to_file_initial(struct list_head *peaks, char *filename)
-{
-    FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
-    peak_str *peak = NULL;
-
-    foreach(peak, *peaks){
-        if(peak->state == PEAK_INITIAL)
-            fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess);
-    }
-
-    if(file != stdout)
-        fclose(file);
-}
-
-void dump_peaks_to_file_full(struct list_head *peaks, char *filename)
-{
-    FILE *file = (!filename || filename[0] == '-') ? stdout : fopen(filename, "w");
-    peak_str *peak = NULL;
-
-    foreach(peak, *peaks){
-        fprintf(file, "%g %g %g %g %g %g %g %g %g %g %g %g %d\n", peak->x, peak->y, peak->flux, peak->bg, peak->dx, peak->dy, peak->dflux, peak->dbg, peak->a, peak->b, peak->theta, peak->excess, peak->id);
+        if(peak->state & state)
+            fprintf(file, "%g %g %g %g %d %g %g %g %g %g %g %d\n", peak->x, peak->y, peak->flux, peak->dflux, peak->flags, peak->dx, peak->dy, peak->a, peak->b, peak->theta, peak->excess, peak->id);
     }
 
     if(file != stdout)

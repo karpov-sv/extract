@@ -491,11 +491,17 @@ image_str *image_errors(image_str *image, double bias, double gain, double readn
     int d;
 
     if(image->type == IMAGE_DOUBLE)
-        for(d = 0; d < image->width*image->height; d++)
-            errors->double_data[d] = hypot(readnoise, sqrt((image->double_data[d] - bias)/gain));
+        for(d = 0; d < image->width*image->height; d++){
+            double value = (image->double_data[d] - bias)/gain;
+
+            errors->double_data[d] = hypot(readnoise, sqrt(MAX(0, value)));
+        }
     else
-        for(d = 0; d < image->width*image->height; d++)
-            errors->double_data[d] = hypot(readnoise, sqrt((image->data[d] - bias)/gain));
+        for(d = 0; d < image->width*image->height; d++){
+            double value = (image->data[d] - bias)/gain;
+
+            errors->double_data[d] = hypot(readnoise, sqrt(MAX(0, value)));
+        }
 
     image_copy_properties(image, errors);
 

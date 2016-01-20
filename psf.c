@@ -11,8 +11,8 @@
 #include "psf.h"
 
 int psf_var_degree = 4;
-int psf_vignet_size = 30;
-int psf_size = 40;
+int psf_vignet_size = 40;
+int psf_size = 31;
 double psf_gain = 0.0;
 double psf_satur_level = 50000.0;
 double psf_phot_aper = 5.0;
@@ -383,7 +383,7 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
                         " -CATALOG_TYPE FITS_LDAC -PARAMETERS_NAME %s"
                         " -FILTER Y -FILTER_NAME %s"
                         " -CLEAN Y -VERBOSE_TYPE QUIET"
-                        " -DETECT_THRESH 3"
+                        " -DETECT_THRESH 3 -BACK_SIZE 128 -BACK_FILTERSIZE 3"
                         " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
                         " -CATALOG_NAME %s",
                         filename, empty_filename, param_filename, filter_filename,
@@ -391,7 +391,7 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
 
     /* PSFEx part */
     system_run_silently("psfex %s -c %s -OUTCAT_NAME %s"
-                        " -PSFVAR_DEGREES %d -PSF_SIZE %d,%d -PSF_RECENTER Y -PSF_RECENTER Y -PSFVAR_NSNAP 20"
+                        " -PSFVAR_DEGREES %d -PSF_SIZE %d,%d -PSF_RECENTER Y -PSFVAR_NSNAP 20"
                         " -NTHREADS 0 -CHECKIMAGE_TYPE NONE -VERBOSE_TYPE QUIET -WRITE_XML N",
                         cat_filename, empty_filename, psf_name,
                         psf_var_degree, psf_size, psf_size);
