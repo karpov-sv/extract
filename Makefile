@@ -34,10 +34,13 @@ LIBFAVOR_OBJS = \
 		image_keywords.o \
 		image_fits.o \
 		image_clean.o \
+		image_background.o \
 	kdtree.o \
 	psf.o \
 	mpfit.o \
 	random.o \
+        csa/csa.o \
+                csa/svd.o \
 
 EXTRACT_OBJS = \
 	extract.o \

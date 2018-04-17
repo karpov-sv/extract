@@ -10,9 +10,10 @@
 
 #include "psf.h"
 
-int psf_var_degree = 4;
+int psf_var_degree = 2;
 int psf_vignet_size = 40;
-int psf_size = 31;
+int psf_size = 25;
+int psf_subtract_bg = FALSE;
 double psf_gain = 0.0;
 double psf_satur_level = 50000.0;
 double psf_phot_aper = 5.0;
@@ -42,10 +43,21 @@ psf_str *psf_create(char *filename)
     if(psf->ncoeffs > 1){
         fits_read_key(fits, TINT, "POLDEG1", &psf->degree, NULL, &status);
 
+        if(!status){
+            fits_read_key(fits, TINT, "POLDEG2", &psf->zdegree, NULL, &status);
+            status = 0;
+        }
+
         fits_read_key(fits, TDOUBLE, "POLZERO1", &psf->x0, NULL, &status);
         fits_read_key(fits, TDOUBLE, "POLSCAL1", &psf->sx, NULL, &status);
         fits_read_key(fits, TDOUBLE, "POLZERO2", &psf->y0, NULL, &status);
         fits_read_key(fits, TDOUBLE, "POLSCAL2", &psf->sy, NULL, &status);
+
+        if(!status){
+            fits_read_key(fits, TDOUBLE, "POLZERO3", &psf->z0, NULL, &status);
+            fits_read_key(fits, TDOUBLE, "POLSCAL3", &psf->sz, NULL, &status);
+            status = 0;
+        }
     }
 
     psf->C = malloc(sizeof(double)*psf->ncoeffs*psf->width*psf->height);
@@ -53,7 +65,7 @@ psf_str *psf_create(char *filename)
 
     fits_close_file(fits, &status);
 
-    if(status != 0){
+    if(status != 0 && status != 202){
         dprintf("Can't parse PSFex file: %s\n", filename);
         exit(EXIT_FAILURE);
     }
@@ -73,42 +85,62 @@ void psf_delete(psf_str *psf)
     free(psf);
 }
 
-inline double psf_sampled_value(psf_str *psf, int x, int y, int x0, int y0)
+inline double psf_sampled_value(psf_str *psf, int x, int y, double x0, double y0, double z0)
 {
     double dx = (x0 - psf->x0)/psf->sx;
     double dy = (y0 - psf->y0)/psf->sy;
+    double dz = (z0 - psf->z0)/psf->sz;
     int i1;
     int i2;
+    int i3;
+    double pi3 = 1;
     double value = 0;
-    double pi2 = 1;
     int idx =  + y*psf->width + x;
 
-    for(i2 = 0; i2 <= psf->degree; i2++){
-        double pi1 = 1;
+    for(i3 = 0; i3 <= psf->zdegree; i3++){
+        double pi2 = 1;
 
-        for(i1 = 0; i1 <= psf->degree - i2; i1++){
-            value += pi1*pi2*psf->C[idx];
-            pi1 *= dx;
-            idx += psf->width*psf->height;
+        for(i2 = 0; i2 <= psf->degree; i2++){
+            double pi1 = 1;
+
+            for(i1 = 0; i1 <= psf->degree - i2; i1++){
+                value += pi1*pi2*pi3*psf->C[idx];
+                pi1 *= dx;
+                idx += psf->width*psf->height;
+            }
+
+            pi2 *= dy;
         }
 
-        pi2 *= dy;
+        pi3 *= dz;
     }
 
     return value;
 }
 
-image_str *psf_sampled_image(psf_str *psf, double x0, double y0)
+image_str *psf_sampled_image_3d(psf_str *psf, double x0, double y0, double z0)
 {
     image_str *image = image_create_double(psf->width, psf->height);
     int x;
     int y;
+    double min = 0;
 
     for(x = 0; x < psf->width; x++)
         for(y = 0; y < psf->height; y++)
-            PIXEL_DOUBLE(image, x, y) = psf_sampled_value(psf, x, y, x0, y0);
+            PIXEL_DOUBLE(image, x, y) = psf_sampled_value(psf, x, y, x0, y0, z0);
+
+    /* min = image_min_value(image); */
+
+    /* for(x = 0; x < psf->width; x++) */
+    /*     for(y = 0; y < psf->height; y++) */
+    /*         PIXEL_DOUBLE(image, x, y) -= min; */
 
     return image;
+}
+
+image_str *psf_sampled_image(psf_str *psf, double x0, double y0)
+{
+    return psf_sampled_image_3d(psf, x0, y0, psf->z0);
 }
 
 /* SExtractor stuff starts */
@@ -329,9 +361,27 @@ static int _psfex_vignet_resample(double *pix1, int w1, int h1,
 
 void psf_image_fill(psf_str *psf, image_str *sampled, image_str *image, double dx, double dy)
 {
+    int d;
+    double sum = 0;
+    double min = 0;
+
     _psfex_vignet_resample(sampled->double_data, sampled->width, sampled->height,
                            image->double_data, image->width, image->height,
                            -dx/psf->pix_step, -dy/psf->pix_step, 1.0/psf->pix_step);
+
+    for(d = 0; d < image->width*image->height; d++){
+        if(image->double_data[d] > 0)
+            min = min ? MIN(min, image->double_data[d]) : image->double_data[d];
+    }
+
+    for(d = 0; d < image->width*image->height; d++){
+        if(image->double_data[d] > 0)
+            image->double_data[d] -= min;
+        sum += image->double_data[d];
+    }
+
+    for(d = 0; d < image->width*image->height; d++)
+        image->double_data[d] /= sum;
 }
 
 image_str *psf_image(psf_str *psf, image_str *sampled, double dx, double dy, int size)
@@ -343,7 +393,7 @@ image_str *psf_image(psf_str *psf, image_str *sampled, double dx, double dy, int
     return image;
 }
 
-psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
+psf_str *psf_create_from_fits_and_save(char *filename, char *errorsname, char *outname)
 {
     char *dirname = make_temp_dirname("/tmp/psfex_XXXXXX");
 
@@ -376,25 +426,44 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
             "VIGNET(%d,%d)\n"
             "X_IMAGE\nY_IMAGE\n"
             "FLUX_RADIUS\nFLUX_APER\nFLUXERR_APER\n"
-            "ELONGATION\nFLAGS\nFLUX_MAX\nSNR_WIN\n", psf_vignet_size, psf_vignet_size);
+            "ELONGATION\nFLAGS\nFLUX_MAX\nSNR_WIN\nMAG_APER\n", psf_vignet_size, psf_vignet_size);
     fclose(file);
 
-    system_run_silently("sex %s -c %s"
-                        " -CATALOG_TYPE FITS_LDAC -PARAMETERS_NAME %s"
-                        " -FILTER Y -FILTER_NAME %s"
-                        " -CLEAN Y -VERBOSE_TYPE QUIET"
-                        " -DETECT_THRESH 3 -BACK_SIZE 128 -BACK_FILTERSIZE 3"
-                        " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
-                        " -CATALOG_NAME %s",
-                        filename, empty_filename, param_filename, filter_filename,
-                        psf_gain, psf_satur_level, psf_phot_aper, cat_filename);
+    if(errorsname)
+        system_run_silently("sex %s -c %s"
+                            " -CATALOG_TYPE FITS_LDAC -PARAMETERS_NAME %s"
+                            " -FILTER Y -FILTER_NAME %s"
+                            " -CLEAN Y -VERBOSE_TYPE QUIET"
+                            " -DETECT_THRESH 2.5 -ANALYSIS_THRESH 2.5  -DETECT_MINAREA 3"
+                            " -BACK_TYPE %s -BACK_VALUE 0.0"
+                            " -GAIN 1.0e+20 -WEIGHT_GAIN N -WEIGHT_TYPE MAP_RMS -WEIGHT_IMAGE %s"
+                            " -SATUR_LEVEL %g -PHOT_APERTURES %g"
+                            " -CATALOG_NAME %s",
+                            filename, empty_filename, param_filename, filter_filename,
+                            psf_subtract_bg ? "AUTO" : "MANUAL",
+                            errorsname, psf_satur_level, psf_phot_aper, cat_filename);
+    else
+        system_run_silently("sex %s -c %s"
+                            " -CATALOG_TYPE FITS_LDAC -PARAMETERS_NAME %s"
+                            " -FILTER Y -FILTER_NAME %s"
+                            " -CLEAN Y -VERBOSE_TYPE QUIET"
+                            " -DETECT_THRESH 2.5 -ANALYSIS_THRESH 2.5  -DETECT_MINAREA 3"
+                            " -BACK_TYPE %s -BACK_VALUE 0.0"
+                            " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
+                            " -CATALOG_NAME %s",
+                            filename, empty_filename, param_filename, filter_filename,
+                            psf_subtract_bg ? "AUTO" : "MANUAL",
+                            psf_gain, psf_satur_level, psf_phot_aper, cat_filename);
 
     /* PSFEx part */
     system_run_silently("psfex %s -c %s -OUTCAT_NAME %s"
-                        " -PSFVAR_DEGREES %d -PSF_SIZE %d,%d -PSF_RECENTER Y -PSFVAR_NSNAP 20"
-                        " -NTHREADS 0 -CHECKIMAGE_TYPE NONE -VERBOSE_TYPE QUIET -WRITE_XML N",
+                        " -PSFVAR_KEYS X_IMAGE,Y_IMAGE -PSFVAR_GROUPS 1,1 -PSFVAR_DEGREES %d"
+                        " -PSF_SIZE %d,%d -PSF_RECENTER Y -PSFVAR_NSNAP 20 -SAMPLE_MINSN 10 -SAMPLE_MAXELLIP 0.5"
+                        " -NTHREADS 0 -VERBOSE_TYPE FULL -WRITE_XML N -SAMPLE_FLAGMASK 0x00ff"
+                        //" -BASIS_TYPE FILE",
+                        " -BASIS_TYPE PIXEL_AUTO",
                         cat_filename, empty_filename, psf_name,
-                        psf_var_degree, psf_size, psf_size);
+                        psf_var_degree, psf_size, psf_size, psf_size);
 
     if(file_exists_and_normal(psf_name)){
         psf = psf_create(psf_name);
@@ -418,9 +487,9 @@ psf_str *psf_create_from_fits_and_save(char *filename, char *outname)
     return psf;
 }
 
-psf_str *psf_create_from_fits(char *filename)
+psf_str *psf_create_from_fits(char *filename, char *errorsname)
 {
-    return psf_create_from_fits_and_save(filename, NULL);
+    return psf_create_from_fits_and_save(filename, errorsname, NULL);
 }
 
 image_str *image_smooth_psf(image_str *image, psf_str *psf)
@@ -431,6 +500,9 @@ image_str *image_smooth_psf(image_str *image, psf_str *psf)
     int step = 16;
     int size = floor(0.5*psf->width*psf->pix_step);
     double saturation = image_max_value(image);
+
+    if(image_keyword_find(image, "SATURATE"))
+        saturation = image_keyword_get_double(image, "SATURATE");
 
 #pragma omp parallel for private(x)
     for(y = 0; y < image->height; y += step){
@@ -458,14 +530,17 @@ image_str *image_smooth_psf(image_str *image, psf_str *psf)
                             double weight = PIXEL_DOUBLE(kernel, x1 - x-dx + size, y1 - y-dy + size);
 
                             if(image->type == IMAGE_DOUBLE){
-                                if(PIXEL_DOUBLE(image, x1, y1) < saturation)
+                                if(PIXEL_DOUBLE(image, x1, y1) < saturation){
                                     value += PIXEL_DOUBLE(image, x1, y1)*weight;
+                                    kernel_sum += weight;
+                                }
                             } else {
-                                if(PIXEL(image, x1, y1) < saturation)
+                                if(PIXEL(image, x1, y1) < saturation){
                                     value += PIXEL(image, x1, y1)*weight;
+                                    kernel_sum += weight;
+                                }
                             }
 
-                            kernel_sum += weight;
                         }
 
                     PIXEL_DOUBLE(res, x+dx, y+dy) = value/kernel_sum;
@@ -497,4 +572,195 @@ image_str *image_unsharp_psf(image_str *image, psf_str *psf)
             smooth->double_data[d] = image->data[d] - smooth->double_data[d];
 
     return smooth;
+}
+
+/* Rough FWHM estimation as a square root of pixels above half maximum */
+/* Zero background is assumed */
+double image_fwhm(image_str *image)
+{
+    int x;
+    int y;
+    double sum0 = 0;
+    double sum = 0;
+
+    double max = image_max_value(image);
+    int N = 0;
+
+    for(y = 0; y < image->height; y++)
+        for(x = 0; x < image->width; x++){
+            double I1 = PIXEL_DOUBLE(image, x, y);
+
+            sum0 += I1;
+
+            if(I1 >= 0.5*max){
+                N ++;
+                sum += I1;
+            }
+        }
+
+    return sum/sum0;//sqrt(1.0*N);
+}
+
+/* Zero background is assumed */
+double image_ellipticity(image_str *image)
+{
+    int x;
+    int y;
+
+    double x1 = 0;
+    double y1 = 0;
+    double x2 = 0;
+    double y2 = 0;
+    double xy = 0;
+    double I = 0;
+
+    double Imin = image_min_value(image);
+
+    double A;
+    double B;
+
+    for(y = 0; y < image->height; y++)
+        for(x = 0; x < image->width; x++){
+            double I1 = PIXEL_DOUBLE(image, x, y) - Imin;
+
+            x1 += I1*x;
+            y1 += I1*y;
+
+            x2 += I1*x*x;
+            y2 += I1*y*y;
+            xy += I1*x*y;
+
+            I += I1;
+        }
+
+    x1 /= I;
+    y1 /= I;
+
+    x2 = (x2/I - x1*x1);
+    y2 = (y2/I - y1*y1);
+    xy = (xy/I - x1*y1);
+
+    /* Handling singular cases */
+    if(x2*y2 - xy*xy < 1./12/12){
+        x2 += 1./12;
+        y2 += 1./12;
+    }
+
+    A = sqrt((x2 + y2)/2 + sqrt((x2 - y2)*(x2 - y2)/4 + xy*xy));
+    B = sqrt((x2 + y2)/2 - sqrt((x2 - y2)*(x2 - y2)/4 + xy*xy));
+
+    if(!isfinite(A) || !isfinite(B)){
+        dprintf("%g %g - %g %g %g %g %g - %g\n", A, B, x1, y1, x2, y2, xy, I);
+        image_dump_to_fits(image, "out.psf.fits");
+        exit(1);
+    }
+
+
+    return 1.0 - B/A;
+}
+
+int psf_is_positive(psf_str *psf, image_str *image)
+{
+    int x;
+    int y;
+    int step = 16;
+    int result = TRUE;
+
+#pragma omp parallel for private(x)
+    for(y = 0; y < image->height; y += step){
+        for(x = 0; x < image->width; x += step){
+            image_str *sampled = psf_sampled_image(psf, x+0.5*step, y+0.5*step);
+
+            if(image_sum(sampled) <= 0)
+                result =  FALSE;
+        }
+
+    }
+
+    return result;
+}
+
+int psf_photometry(image_str *image, char *psfname, char *cat_filename, int is_psf)
+{
+    char *dirname = make_temp_dirname("/tmp/psfex_XXXXXX");
+
+    char *empty_filename = make_string("%s/default.empty", dirname);
+    char *filter_filename = make_string("%s/default.filter", dirname);
+    char *param_filename = make_string("%s/default.params", dirname);
+    char *image_filename = make_string("%s/image.fits", dirname);
+
+    FILE *file = NULL;
+
+    /* SExtractor part */
+    file = fopen(empty_filename, "w");
+    fclose(file);
+
+    file = fopen(filter_filename, "w");
+    fprintf(file, "CONV NORM\n"
+            "# 5x5 convolution mask of a gaussian PSF with FWHM = 2.0 pixels.\n"
+            "0.006319 0.040599 0.075183 0.040599 0.006319\n"
+            "0.040599 0.260856 0.483068 0.260856 0.040599\n"
+            "0.075183 0.483068 0.894573 0.483068 0.075183\n"
+            "0.040599 0.260856 0.483068 0.260856 0.040599\n"
+            "0.006319 0.040599 0.075183 0.040599 0.006319\n");
+    fclose(file);
+
+    file = fopen(param_filename, "w");
+
+    if(is_psf)
+        fprintf(file,
+                "XWIN_IMAGE\nYWIN_IMAGE\n"
+                "FLUX_PSF\nFLUXERR_PSF\n"
+                //"FLUX_APER\nFLUXERR_APER\n"
+                "FLAGS\nCHI2_PSF\nBACKGROUND\nNUMBER\nFWHM_IMAGE\nELLIPTICITY\nFLUX_MAX\n");
+    else
+        fprintf(file,
+                "XWIN_IMAGE\nYWIN_IMAGE\n"
+                "FLUX_APER\nFLUXERR_APER\n"
+                "FLAGS\nSNR_WIN\nBACKGROUND\nNUMBER\nFWHM_IMAGE\nELLIPTICITY\nFLUX_MAX\n");
+
+    fclose(file);
+
+    image_dump_to_fits(image, image_filename);
+
+    if(file_exists_and_normal(cat_filename))
+        unlink(cat_filename);
+
+    if(is_psf)
+        system_run("sex %s -c %s"
+                   " -CATALOG_TYPE ASCII -PARAMETERS_NAME %s"
+                   " -FILTER Y -FILTER_NAME %s"
+                   " -CLEAN Y -VERBOSE_TYPE NORMAL"
+                   " -DETECT_THRESH 1.0 -ANALYSIS_THRESH 0.5 -DETECT_MINAREA 3"
+                   " -BACK_TYPE %s -BACK_VALUE 0.0 -BACKPHOTO_TYPE GLOBAL"
+                   " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
+                   " -CATALOG_NAME %s -PSF_NAME %s -PSF_NMAX 1",
+                   image_filename, empty_filename, param_filename, filter_filename,
+                   psf_subtract_bg ? "AUTO" : "MANUAL",
+                   psf_gain, psf_satur_level, psf_phot_aper, cat_filename, psfname);
+    else
+        system_run("sex %s -c %s"
+                   " -CATALOG_TYPE ASCII -PARAMETERS_NAME %s"
+                   " -FILTER Y -FILTER_NAME %s"
+                   " -CLEAN Y -VERBOSE_TYPE NORMAL"
+                   " -DETECT_THRESH 2.0 -ANALYSIS_THRESH 1.5 -DETECT_MINAREA 3"
+                   " -BACK_TYPE %s -BACK_VALUE 0.0 -BACKPHOTO_TYPE GLOBAL"
+                   " -GAIN %g -SATUR_LEVEL %g -PHOT_APERTURES %g"
+                   " -CATALOG_NAME %s",
+                   image_filename, empty_filename, param_filename, filter_filename,
+                   psf_subtract_bg ? "AUTO" : "MANUAL",
+                   psf_gain, psf_satur_level, psf_phot_aper, cat_filename);
+
+    remove_dir(dirname);
+
+    free(image_filename);
+    free(param_filename);
+    free(filter_filename);
+    free(empty_filename);
+
+    if(!file_exists_and_normal(cat_filename)){
+        dprintf("Error performing SExtractor %s photometry!\n", is_psf ? "PSF" : "aperture");
+        return FALSE;
+    } else
+        return TRUE;
 }

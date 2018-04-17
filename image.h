@@ -59,6 +59,7 @@ void image_delete(image_str *);
     } while(0)
 
 void image_fill(image_str *, double );
+void image_fill_nans(image_str *, double );
 void image_clean(image_str *);
 
 void image_copy_properties(image_str *, image_str *);
@@ -82,6 +83,7 @@ int image_keyword_get_int(image_str *, char *);
 u_int64_t image_keyword_get_int64(image_str *, char *);
 double image_keyword_get_double(image_str *, char *);
 double image_keyword_get_sexagesimal(image_str *, char *);
+time_str image_keyword_get_time(image_str *, char *);
 char *image_keywords_as_hstore(image_str *);
 void image_keyword_add_coords(image_str *, coords_str );
 coords_str image_keyword_get_coords(image_str *);
@@ -121,6 +123,7 @@ double image_median(image_str *);
 
 /* ANDOR-specific cleanups */
 void image_clean_stripes(image_str *);
+void image_linearize(image_str *, image_str *);
 
 /* Image smoothing - Gaussian */
 image_str *image_smooth(image_str *, double );
@@ -128,5 +131,8 @@ image_str *image_unsharp(image_str *, double );
 
 /* Errors image from data image using bias, gain and readout noise */
 image_str *image_errors(image_str *, double , double , double );
+
+/* Image background estimation */
+image_str *image_background(image_str *, image_str *, image_str *, int );
 
 #endif /* IMAGE_H */
